@@ -236,6 +236,36 @@ def get_resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
 
+
+# ===================== 用户配置持久化 =====================
+def get_app_dir():
+    """获取程序所在目录（兼容PyInstaller打包后与源码运行两种情况）"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+CONFIG_FILE = os.path.join(get_app_dir(), "config.json")
+
+
+def load_config():
+    """读取 config.json；不存在或损坏时返回空字典（utf-8-sig 兼容带 BOM 的文件）"""
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_config(cfg):
+    """写入 config.json（无 BOM 的 UTF-8，便于用记事本等直接编辑）"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"配置保存失败: {e}")
+
+
 class KeySignal(QObject):
     pressed = pyqtSignal(str)
     released = pyqtSignal(str)
@@ -307,10 +337,14 @@ class AudioEngine:
         self.current_space_snd = None
         
         # 尝试默认加载或创建 default_pack
-        default_p = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "default_pack")
+        default_p = os.path.join(get_app_dir(), "default_pack")
         if not os.path.exists(default_p):
             os.makedirs(default_p, exist_ok=True)
-        self.load_pack(default_p)
+        # ★ 优先加载上次使用的音效包；音效包被移动/删除时回退到 default_pack
+        saved_pack = load_config().get("pack_dir", "")
+        if not (saved_pack and os.path.isdir(saved_pack)):
+            saved_pack = default_p
+        self.load_pack(saved_pack)
 
     def load_pack(self, pack_dir, overwrite_rules=True):
         self.pack_dir = pack_dir
@@ -326,6 +360,11 @@ class AudioEngine:
                 except: pass
         else:
             self.save_rules()
+        # ★ 记住当前音效包，下次启动自动加载
+        if self.pack_dir and os.path.isdir(self.pack_dir):
+            cfg = load_config()
+            cfg["pack_dir"] = self.pack_dir
+            save_config(cfg)
         self.reload_sounds()
 
     def reload_sounds(self):
@@ -355,7 +394,7 @@ class AudioEngine:
 
     def save_rules(self):
         if not self.pack_dir:
-            self.pack_dir = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "default_pack")
+            self.pack_dir = os.path.join(get_app_dir(), "default_pack")
         if not os.path.exists(self.pack_dir):
             os.makedirs(self.pack_dir, exist_ok=True)
         try:
