@@ -6,8 +6,8 @@ import copy
 import time
 import threading
 import tempfile
+import subprocess
 import numpy as np
-import keyboard
 import pygame
 import pygame.sndarray
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -17,66 +17,108 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QToolBox, QMessageBox, QAbstractItemView, QDialog)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QIcon, QFont
-import ctypes
-import ctypes.wintypes
 
-# ===================== Win32 常量与结构 =====================
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MACOS = sys.platform == "darwin"
 
-INPUT_KEYBOARD = 1
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_EXTENDEDKEY = 0x0001
+keyboard_lib = None
+pynput_keyboard = None
+pynput_controller = None
+AppKit = None
+ApplicationServices = None
+Quartz = None
 
-GWL_EXSTYLE = -20
-WS_EX_NOACTIVATE = 0x08000000
-WS_EX_TOOLWINDOW = 0x00000080
-WS_EX_TOPMOST = 0x00000008
+if IS_WINDOWS:
+    import ctypes
+    import ctypes.wintypes
+    import keyboard as keyboard_lib
+elif IS_MACOS:
+    try:
+        from pynput import keyboard as pynput_keyboard
+        pynput_controller = pynput_keyboard.Controller()
+    except Exception as e:
+        print(f"pynput 加载失败: {e}")
+    try:
+        import AppKit
+    except Exception as e:
+        print(f"AppKit 加载失败: {e}")
+    try:
+        import ApplicationServices
+    except Exception as e:
+        print(f"ApplicationServices 加载失败: {e}")
+    try:
+        import Quartz
+    except Exception as e:
+        print(f"Quartz 加载失败: {e}")
+else:
+    try:
+        import keyboard as keyboard_lib
+    except Exception as e:
+        print(f"keyboard 加载失败: {e}")
 
-SW_SHOWNOACTIVATE = 4
-SWP_NOACTIVATE = 0x0010
-SWP_NOMOVE = 0x0002
-SWP_NOSIZE = 0x0001
-HWND_TOPMOST = -1
+# ===================== Windows / macOS 平台能力 =====================
+if IS_WINDOWS:
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
 
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", ctypes.c_ushort),
-        ("wScan", ctypes.c_ushort),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_EXTENDEDKEY = 0x0001
 
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [
-        ("uMsg", ctypes.c_ulong),
-        ("wParamL", ctypes.c_ushort),
-        ("wParamH", ctypes.c_ushort),
-    ]
+    GWL_EXSTYLE = -20
+    WS_EX_NOACTIVATE = 0x08000000
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_TOPMOST = 0x00000008
 
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", ctypes.c_long),
-        ("dy", ctypes.c_long),
-        ("mouseData", ctypes.c_ulong),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
-    ]
+    SW_SHOWNOACTIVATE = 4
+    SWP_NOACTIVATE = 0x0010
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    HWND_TOPMOST = -1
 
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [
-        ("mi", MOUSEINPUT),
-        ("ki", KEYBDINPUT),
-        ("hi", HARDWAREINPUT),
-    ]
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.c_ushort),
+            ("wScan", ctypes.c_ushort),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
 
-class INPUT(ctypes.Structure):
-    _fields_ = [
-        ("type", ctypes.c_ulong),
-        ("union", INPUT_UNION),
-    ]
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [
+            ("uMsg", ctypes.c_ulong),
+            ("wParamL", ctypes.c_ushort),
+            ("wParamH", ctypes.c_ushort),
+        ]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", ctypes.c_long),
+            ("dy", ctypes.c_long),
+            ("mouseData", ctypes.c_ulong),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [
+            ("mi", MOUSEINPUT),
+            ("ki", KEYBDINPUT),
+            ("hi", HARDWAREINPUT),
+        ]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [
+            ("type", ctypes.c_ulong),
+            ("union", INPUT_UNION),
+        ]
+else:
+    user32 = None
+    kernel32 = None
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_EXTENDEDKEY = 0x0001
 
 VK_MAP = {
     'space': 0x20, 'enter': 0x0D, 'tab': 0x09, 'back': 0x08,
@@ -115,6 +157,8 @@ _is_simulating = False
 
 def _make_key_input(vk, flags=0):
     """构造一个键盘 INPUT 结构"""
+    if not IS_WINDOWS:
+        return None
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
     inp.union.ki.wVk = vk
@@ -129,9 +173,353 @@ def _make_key_input(vk, flags=0):
 
 def do_send_input(inputs):
     """发送一组 INPUT"""
+    if not IS_WINDOWS:
+        return
     n = len(inputs)
     arr = (INPUT * n)(*inputs)
     user32.SendInput(n, arr, ctypes.sizeof(INPUT))
+
+
+class KeyEvent:
+    KEY_DOWN = "down"
+    KEY_UP = "up"
+
+    def __init__(self, name, event_type, scan_code=None):
+        self.name = name
+        self.event_type = event_type
+        self.scan_code = scan_code
+
+
+MAC_KEYCODE_MAP = {
+    0: 'a', 1: 's', 2: 'd', 3: 'f', 4: 'h', 5: 'g', 6: 'z', 7: 'x',
+    8: 'c', 9: 'v', 11: 'b', 12: 'q', 13: 'w', 14: 'e', 15: 'r',
+    16: 'y', 17: 't', 18: '1', 19: '2', 20: '3', 21: '4', 22: '6',
+    23: '5', 24: '=', 25: '9', 26: '7', 27: '-', 28: '8', 29: '0',
+    30: ']', 31: 'o', 32: 'u', 33: '[', 34: 'i', 35: 'p', 37: 'l',
+    38: 'j', 39: "'", 40: 'k', 41: ';', 42: '\\', 43: ',', 44: '/',
+    45: 'n', 46: 'm', 47: '.', 48: 'tab', 49: 'space', 50: '`',
+    51: 'back', 53: 'esc', 55: 'win', 56: 'shift', 57: 'caps',
+    58: 'alt', 59: 'ctrl', 60: 'rshift', 61: 'ralt', 62: 'rctrl',
+    63: 'fn', 64: 'f17', 65: '.', 67: '*', 69: '+', 71: 'clear',
+    75: '/', 76: 'enter', 78: '-', 81: '=', 82: '0', 83: '1',
+    84: '2', 85: '3', 86: '4', 87: '5', 88: '6', 89: '7', 91: '8',
+    92: '9', 96: 'f5', 97: 'f6', 98: 'f7', 99: 'f3', 100: 'f8',
+    101: 'f9', 103: 'f11', 105: 'f13', 106: 'f16', 107: 'f14',
+    109: 'f10', 111: 'f12', 113: 'f15', 114: 'ins', 115: 'home',
+    116: 'pageup', 117: 'del', 118: 'f4', 119: 'end', 120: 'f2',
+    121: 'pagedown', 122: 'f1', 123: 'left', 124: 'right', 125: 'down',
+    126: 'up',
+}
+
+
+class MacQuartzKeyListener:
+    def __init__(self, callback, capture_press_only=False):
+        self.callback = callback
+        self.capture_press_only = capture_press_only
+        self.tap = None
+        self.source = None
+        self.thread = None
+        self.loop = None
+        self.running = False
+
+    def start(self):
+        if not Quartz:
+            return False
+        mask = (
+            Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
+        )
+        self.tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            mask,
+            self._handle_event,
+            None
+        )
+        if not self.tap:
+            return False
+        self.source = Quartz.CFMachPortCreateRunLoopSource(None, self.tap, 0)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self.running = True
+        return True
+
+    def stop(self):
+        self.running = False
+        try:
+            if self.tap:
+                Quartz.CGEventTapEnable(self.tap, False)
+            if self.loop:
+                Quartz.CFRunLoopStop(self.loop)
+        except Exception as e:
+            print(f"停止 Quartz 键盘监听失败: {e}")
+
+    def _run(self):
+        self.loop = Quartz.CFRunLoopGetCurrent()
+        Quartz.CFRunLoopAddSource(self.loop, self.source, Quartz.kCFRunLoopCommonModes)
+        Quartz.CGEventTapEnable(self.tap, True)
+        Quartz.CFRunLoopRun()
+
+    def _handle_event(self, proxy, event_type, event, refcon):
+        try:
+            if event_type in (
+                Quartz.kCGEventTapDisabledByTimeout,
+                Quartz.kCGEventTapDisabledByUserInput,
+            ):
+                Quartz.CGEventTapEnable(self.tap, True)
+                return event
+
+            keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+            key = MAC_KEYCODE_MAP.get(keycode)
+            if not key:
+                return event
+
+            if event_type == Quartz.kCGEventKeyDown:
+                self.callback(KeyEvent(key, KeyEvent.KEY_DOWN))
+            elif event_type == Quartz.kCGEventKeyUp:
+                if not self.capture_press_only:
+                    self.callback(KeyEvent(key, KeyEvent.KEY_UP))
+            elif event_type == Quartz.kCGEventFlagsChanged:
+                flags = Quartz.CGEventGetFlags(event)
+                is_down = self._modifier_down(key, flags)
+                if is_down:
+                    self.callback(KeyEvent(key, KeyEvent.KEY_DOWN))
+                elif not self.capture_press_only:
+                    self.callback(KeyEvent(key, KeyEvent.KEY_UP))
+        except Exception as e:
+            print(f"Quartz 键盘事件处理失败: {e}")
+        return event
+
+    def _modifier_down(self, key, flags):
+        if key in ('shift', 'rshift'):
+            return bool(flags & Quartz.kCGEventFlagMaskShift)
+        if key in ('ctrl', 'rctrl'):
+            return bool(flags & Quartz.kCGEventFlagMaskControl)
+        if key in ('alt', 'ralt'):
+            return bool(flags & Quartz.kCGEventFlagMaskAlternate)
+        if key in ('win', 'rwin'):
+            return bool(flags & Quartz.kCGEventFlagMaskCommand)
+        if key == 'caps':
+            return bool(flags & Quartz.kCGEventFlagMaskAlphaShift)
+        return False
+
+
+def _normalize_pynput_key(key):
+    if hasattr(key, "char") and key.char:
+        return normalize_key(key.char)
+    name = getattr(key, "name", "") or str(key).replace("Key.", "")
+    return normalize_key(name)
+
+
+def start_key_capture(callback):
+    if keyboard_lib:
+        return ("keyboard", keyboard_lib.on_press(callback))
+    if IS_MACOS and Quartz:
+        listener = MacQuartzKeyListener(callback, capture_press_only=True)
+        if listener.start():
+            return ("quartz", listener)
+    if pynput_keyboard:
+        def on_press(key):
+            try:
+                callback(KeyEvent(_normalize_pynput_key(key), KeyEvent.KEY_DOWN))
+            except Exception as e:
+                print(f"按键捕获失败: {e}")
+        listener = pynput_keyboard.Listener(on_press=on_press)
+        listener.start()
+        return ("pynput", listener)
+    return None
+
+
+def start_global_key_hook(callback):
+    if keyboard_lib:
+        return ("keyboard", keyboard_lib.hook(callback))
+    if IS_MACOS and Quartz:
+        listener = MacQuartzKeyListener(callback)
+        if listener.start():
+            return ("quartz", listener)
+    if pynput_keyboard:
+        def on_press(key):
+            try:
+                callback(KeyEvent(_normalize_pynput_key(key), KeyEvent.KEY_DOWN))
+            except Exception as e:
+                print(f"按键按下处理失败: {e}")
+
+        def on_release(key):
+            try:
+                callback(KeyEvent(_normalize_pynput_key(key), KeyEvent.KEY_UP))
+            except Exception as e:
+                print(f"按键释放处理失败: {e}")
+
+        listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+        listener.start()
+        return ("pynput", listener)
+    return None
+
+
+def stop_key_hook(hook):
+    if not hook:
+        return
+    kind, handle = hook
+    try:
+        if kind == "keyboard" and keyboard_lib:
+            keyboard_lib.unhook(handle)
+        elif kind == "quartz":
+            handle.stop()
+        elif kind == "pynput":
+            handle.stop()
+    except Exception as e:
+        print(f"停止键盘监听失败: {e}")
+
+
+def unhook_all_keys():
+    if keyboard_lib:
+        try:
+            keyboard_lib.unhook_all()
+        except Exception as e:
+            print(f"停止全部键盘监听失败: {e}")
+
+
+def _pynput_key(key):
+    if not pynput_keyboard:
+        return None
+
+    special = {
+        "space": pynput_keyboard.Key.space,
+        "enter": pynput_keyboard.Key.enter,
+        "tab": pynput_keyboard.Key.tab,
+        "back": pynput_keyboard.Key.backspace,
+        "caps": pynput_keyboard.Key.caps_lock,
+        "shift": pynput_keyboard.Key.shift,
+        "rshift": pynput_keyboard.Key.shift_r,
+        "ctrl": pynput_keyboard.Key.ctrl,
+        "rctrl": pynput_keyboard.Key.ctrl_r,
+        "alt": pynput_keyboard.Key.alt,
+        "ralt": pynput_keyboard.Key.alt_r,
+        "win": pynput_keyboard.Key.cmd_l,
+        "rwin": pynput_keyboard.Key.cmd_r,
+        "esc": pynput_keyboard.Key.esc,
+        "del": pynput_keyboard.Key.delete,
+        "home": pynput_keyboard.Key.home,
+        "end": pynput_keyboard.Key.end,
+        "pageup": pynput_keyboard.Key.page_up,
+        "pagedown": pynput_keyboard.Key.page_down,
+        "up": pynput_keyboard.Key.up,
+        "down": pynput_keyboard.Key.down,
+        "left": pynput_keyboard.Key.left,
+        "right": pynput_keyboard.Key.right,
+        "f1": pynput_keyboard.Key.f1,
+        "f2": pynput_keyboard.Key.f2,
+        "f3": pynput_keyboard.Key.f3,
+        "f4": pynput_keyboard.Key.f4,
+        "f5": pynput_keyboard.Key.f5,
+        "f6": pynput_keyboard.Key.f6,
+        "f7": pynput_keyboard.Key.f7,
+        "f8": pynput_keyboard.Key.f8,
+        "f9": pynput_keyboard.Key.f9,
+        "f10": pynput_keyboard.Key.f10,
+        "f11": pynput_keyboard.Key.f11,
+        "f12": pynput_keyboard.Key.f12,
+    }
+    return special.get(key, key if len(key) == 1 else None)
+
+
+def _activate_macos_app(app):
+    if not (IS_MACOS and AppKit and app):
+        return
+    try:
+        app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+    except Exception as e:
+        print(f"恢复 macOS 前台应用失败: {e}")
+
+
+def check_macos_permissions(prompt=False):
+    if not IS_MACOS:
+        return True, True
+
+    ax_ok = True
+    listen_ok = True
+
+    if ApplicationServices:
+        try:
+            if prompt:
+                opts = {ApplicationServices.kAXTrustedCheckOptionPrompt: True}
+                ax_ok = bool(ApplicationServices.AXIsProcessTrustedWithOptions(opts))
+            else:
+                ax_ok = bool(ApplicationServices.AXIsProcessTrusted())
+        except Exception as e:
+            print(f"检查辅助功能权限失败: {e}")
+
+        try:
+            listen_ok = bool(ApplicationServices.CGPreflightListenEventAccess())
+            if prompt and not listen_ok:
+                listen_ok = bool(ApplicationServices.CGRequestListenEventAccess())
+        except Exception as e:
+            print(f"检查输入监控权限失败: {e}")
+
+    return ax_ok, listen_ok
+
+
+def show_macos_permission_warning(parent=None):
+    if not IS_MACOS:
+        return
+    ax_ok, listen_ok = check_macos_permissions(prompt=True)
+    if ax_ok and listen_ok:
+        return
+
+    missing = []
+    if not ax_ok:
+        missing.append("辅助功能")
+    if not listen_ok:
+        missing.append("输入监控")
+
+    msg = QMessageBox(parent)
+    msg.setWindowTitle("需要 macOS 权限")
+    msg.setIcon(QMessageBox.Warning)
+    msg.setText("当前程序还不能监听全局键盘输入。")
+    msg.setInformativeText(
+        "macOS 权限不是每次都要授权，但它会按启动程序分别记录。\n"
+        "请在 系统设置 > 隐私与安全性 中，为本次启动 SoundKeyboard 的应用开启：\n\n"
+        + "\n".join(f"- {item}" for item in missing)
+        + "\n\n如果双击 run.command 启动，通常需要授权 Terminal。"
+        + "\n如果从 Trae / VS Code / Cursor / iTerm2 启动，需要授权对应应用。"
+        + f"\n\n当前 Python: {sys.executable}"
+        + "\n\n开启后请完全退出本程序和启动它的终端/编辑器，再重新打开。"
+    )
+    msg.setStandardButtons(QMessageBox.Ok)
+    msg.exec_()
+
+
+def _simulate_keys_macos(key, modifier_keys=None, target_app=None):
+    global _is_simulating
+    if not pynput_controller:
+        return
+    pk = _pynput_key(key)
+    if pk is None:
+        return
+    mods = []
+    for mk in modifier_keys or []:
+        pm = _pynput_key(mk)
+        if pm:
+            mods.append(pm)
+    try:
+        _is_simulating = True
+        time.sleep(0.01)
+        _activate_macos_app(target_app)
+        if target_app:
+            time.sleep(0.08)
+        for mod in mods:
+            pynput_controller.press(mod)
+        pynput_controller.press(pk)
+        pynput_controller.release(pk)
+        for mod in reversed(mods):
+            pynput_controller.release(mod)
+    except Exception as e:
+        print(f"macOS 模拟按键失败: {e}")
+    finally:
+        time.sleep(0.02)
+        _is_simulating = False
 
 
 def simulate_keys(key, modifier_keys=None, target_hwnd=None):
@@ -139,6 +527,12 @@ def simulate_keys(key, modifier_keys=None, target_hwnd=None):
     在子线程中：恢复目标窗口焦点 → 发送按键 → 完成
     """
     global _is_simulating
+
+    if IS_MACOS:
+        _simulate_keys_macos(key, modifier_keys, target_hwnd)
+        return
+    if not IS_WINDOWS:
+        return
 
     vk = VK_MAP.get(key)
     if vk is None:
@@ -198,17 +592,19 @@ def _build_key_map():
         (['return', 'enter', '\r', '\n'], 'enter'),
         (['escape', 'esc'], 'esc'),
         (['left shift', 'lshift', 'shift'], 'shift'),
-        (['right shift', 'rshift'], 'rshift'),
+        (['right shift', 'rshift', 'r_shift'], 'rshift'),
         (['left ctrl', 'lctrl', 'ctrl', 'left control', 'control'], 'ctrl'),
-        (['right ctrl', 'rctrl', 'right control'], 'rctrl'),
+        (['right ctrl', 'rctrl', 'right control', 'r_ctrl'], 'rctrl'),
         (['left alt', 'lalt', 'alt'], 'alt'),
-        (['right alt', 'ralt', 'altgr'], 'ralt'),
-        (['left windows', 'left win', 'lwin', 'windows', 'win', 'left meta', 'cmd'], 'win'),
-        (['right windows', 'right win', 'rwin', 'right meta'], 'rwin'),
-        (['caps lock', 'capital', 'caps', 'capslock'], 'caps'),
+        (['right alt', 'ralt', 'altgr', 'r_alt'], 'ralt'),
+        (['left windows', 'left win', 'lwin', 'windows', 'win', 'left meta', 'cmd', 'cmd_l'], 'win'),
+        (['right windows', 'right win', 'rwin', 'right meta', 'cmd_r', 'r_win'], 'rwin'),
+        (['caps lock', 'capital', 'caps', 'capslock', 'caps_lock'], 'caps'),
         (['backspace', 'back'], 'back'),
         (['delete', 'del'], 'del'),
         (['insert', 'ins'], 'ins'),
+        (['page up', 'page_up', 'pageup'], 'pageup'),
+        (['page down', 'page_down', 'pagedown'], 'pagedown'),
         (['tab'], 'tab'),
         (['menu', 'apps', 'context menu'], 'menu'),
     ]
@@ -228,6 +624,111 @@ def normalize_key(name, scan_code=None):
     if not name: return ""
     name = str(name).strip().lower()
     return KEY_NAME_MAP.get(name, name)
+
+
+def normalize_rules(raw_rules):
+    rules = {}
+    for key, cfg in (raw_rules or {}).items():
+        norm_key = normalize_key(key)
+        if not norm_key or not isinstance(cfg, dict):
+            continue
+        rules[norm_key] = {
+            "file": cfg.get("file", ""),
+            "enabled": cfg.get("enabled", True)
+        }
+    return rules
+
+
+def get_app_dir():
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+def get_config_path():
+    return os.path.join(get_app_dir(), "config.json")
+
+
+def load_app_config():
+    path = get_config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"读取配置失败: {e}")
+        return {}
+
+
+def save_app_config(config):
+    try:
+        with open(get_config_path(), 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"保存配置失败: {e}")
+
+
+def save_selected_pack_dir(pack_dir):
+    config = load_app_config()
+    config["pack_dir"] = os.path.abspath(pack_dir)
+    save_app_config(config)
+
+
+def get_sound_roots():
+    app_dir = get_app_dir()
+    exe_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
+    candidates = [
+        os.path.join(app_dir, "sound"),
+        os.path.join(os.path.dirname(app_dir), "sound"),
+        os.path.join(exe_dir, "sound"),
+        os.path.join(os.path.dirname(exe_dir), "sound"),
+    ]
+    roots = []
+    seen = set()
+    for root in candidates:
+        root = os.path.abspath(root)
+        if root not in seen and os.path.isdir(root):
+            roots.append(root)
+            seen.add(root)
+    return roots
+
+
+def discover_sound_packs():
+    packs = []
+    seen = set()
+
+    def add_pack(path):
+        path = os.path.abspath(path)
+        if path not in seen and os.path.exists(os.path.join(path, "rule.json")):
+            packs.append(path)
+            seen.add(path)
+
+    for root in get_sound_roots():
+        add_pack(root)
+        try:
+            names = sorted(os.listdir(root))
+        except Exception:
+            names = []
+        for name in names:
+            child = os.path.join(root, name)
+            if os.path.isdir(child):
+                add_pack(child)
+
+    app_dir = get_app_dir()
+    add_pack(os.path.join(app_dir, "default_pack"))
+    return sorted(packs, key=lambda p: os.path.basename(p).lower())
+
+
+def find_default_pack_dir():
+    config = load_app_config()
+    saved_pack = config.get("pack_dir")
+    if saved_pack and os.path.exists(os.path.join(saved_pack, "rule.json")):
+        return os.path.abspath(saved_pack)
+
+    packs = discover_sound_packs()
+    if packs:
+        return packs[0]
+
+    return os.path.join(get_app_dir(), "default_pack")
 
 
 def get_resource_path(relative_path):
@@ -306,14 +807,14 @@ class AudioEngine:
         self.space_start_time = 0.0
         self.current_space_snd = None
         
-        # 尝试默认加载或创建 default_pack
-        default_p = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "default_pack")
+        # 优先加载项目同级/内置 sound 目录中的音效包，找不到再创建 default_pack。
+        default_p = find_default_pack_dir()
         if not os.path.exists(default_p):
             os.makedirs(default_p, exist_ok=True)
         self.load_pack(default_p)
 
     def load_pack(self, pack_dir, overwrite_rules=True):
-        self.pack_dir = pack_dir
+        self.pack_dir = os.path.abspath(pack_dir)
         rp = os.path.join(pack_dir, "rule.json")
         if overwrite_rules:
             if not os.path.exists(rp):
@@ -322,11 +823,12 @@ class AudioEngine:
             else:
                 try:
                     with open(rp, 'r', encoding='utf-8') as f:
-                        self.rules = json.load(f)
+                        self.rules = normalize_rules(json.load(f))
                 except: pass
         else:
             self.save_rules()
         self.reload_sounds()
+        save_selected_pack_dir(self.pack_dir)
 
     def reload_sounds(self):
         self.sounds_normal.clear(); self.sounds_reversed.clear()
@@ -484,11 +986,11 @@ class KeyCaptureDialog(QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
-        self._hook_id = keyboard.on_press(self._on_key)
+        self._hook_id = start_key_capture(self._on_key)
 
     def hideEvent(self, e):
         if self._hook_id:
-            keyboard.unhook(self._hook_id); self._hook_id = None
+            stop_key_hook(self._hook_id); self._hook_id = None
         super().hideEvent(e)
 
     def _on_key(self, e):
@@ -565,8 +1067,20 @@ class CustomSettingsUI(QWidget):
         
         # 2) 音效
         p1 = QWidget(); v1 = QVBoxLayout(p1)
+        pack_row = QHBoxLayout(); pack_row.addWidget(QLabel("当前音效包:"))
+        self.combo_pack = QComboBox()
+        self.combo_pack.currentIndexChanged.connect(self.on_pack_selected)
+        pack_row.addWidget(self.combo_pack)
+        v1.addLayout(pack_row)
         self.btn_load = QPushButton("📂 导入音效包")
-        self.btn_load.clicked.connect(self.do_load_pack)
+        load_menu = QMenu(self.btn_load)
+        act_load_dir = QAction("选择音效包文件夹", self)
+        act_load_dir.triggered.connect(self.do_load_pack_dir)
+        act_load_rule = QAction("选择 rule.json", self)
+        act_load_rule.triggered.connect(self.do_load_pack_rule)
+        load_menu.addAction(act_load_dir)
+        load_menu.addAction(act_load_rule)
+        self.btn_load.setMenu(load_menu)
         self.btn_perf = QPushButton("🎹 开启演奏模式")
         self.btn_perf.setCheckable(True)
         self.btn_perf.toggled.connect(self.toggle_perf)
@@ -574,6 +1088,7 @@ class CustomSettingsUI(QWidget):
         info_v1.setStyleSheet("color:#999;font-size:11px;padding:8px;")
         v1.addWidget(self.btn_load); v1.addWidget(self.btn_perf); v1.addWidget(info_v1); v1.addStretch()
         self.toolbox.addItem(p1, "🎵 音效与模式")
+        self.refresh_pack_combo()
 
         # 3) 规则
         p3 = QWidget(); v3 = QVBoxLayout(p3)
@@ -672,15 +1187,55 @@ class CustomSettingsUI(QWidget):
                         rules[k]={"file":fi.text().strip(),"enabled":ch.isChecked()}
         return rules
 
-    def do_load_pack(self):
-        f=QFileDialog.getExistingDirectory(self,"选择音效包")
-        if f:
-            reply = QMessageBox.question(self, "导入音效包", "是否导入当前规则？",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.audio.load_pack(f, overwrite_rules=True)
-                self._rules_snapshot=copy.deepcopy(self.audio.rules)
-                self.refresh_table()
+    def _load_pack_with_confirm(self, pack_dir):
+        if not pack_dir:
+            return
+        rule_path = os.path.join(pack_dir, "rule.json")
+        if not os.path.exists(rule_path):
+            QMessageBox.warning(self, "导入音效包", "所选目录下没有 rule.json。")
+            return
+        reply = QMessageBox.question(self, "导入音效包", "是否导入当前规则？",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.audio.load_pack(pack_dir, overwrite_rules=True)
+            self._rules_snapshot=copy.deepcopy(self.audio.rules)
+            self.refresh_pack_combo()
+            self.refresh_table()
+
+    def do_load_pack_dir(self):
+        f=QFileDialog.getExistingDirectory(self,"选择音效包文件夹")
+        self._load_pack_with_confirm(f)
+
+    def do_load_pack_rule(self):
+        sd = self.audio.pack_dir if self.audio.pack_dir else find_default_pack_dir()
+        fp, _ = QFileDialog.getOpenFileName(self, "选择 rule.json", sd, "Rule File (rule.json);;JSON (*.json);;所有文件 (*)")
+        if fp:
+            self._load_pack_with_confirm(os.path.dirname(fp))
+
+    def refresh_pack_combo(self):
+        self.combo_pack.blockSignals(True)
+        self.combo_pack.clear()
+        packs = discover_sound_packs()
+        current = os.path.abspath(self.audio.pack_dir) if self.audio.pack_dir else ""
+        if current and current not in packs and os.path.exists(os.path.join(current, "rule.json")):
+            packs.insert(0, current)
+        for pack in packs:
+            name = os.path.basename(pack)
+            parent = os.path.basename(os.path.dirname(pack))
+            label = f"{name} ({parent})" if parent and parent != "SoundKeyboard" else name
+            self.combo_pack.addItem(label, pack)
+        idx = self.combo_pack.findData(current)
+        if idx >= 0:
+            self.combo_pack.setCurrentIndex(idx)
+        self.combo_pack.blockSignals(False)
+
+    def on_pack_selected(self, idx):
+        pack_dir = self.combo_pack.itemData(idx)
+        if not pack_dir or os.path.abspath(pack_dir) == os.path.abspath(self.audio.pack_dir):
+            return
+        self.audio.load_pack(pack_dir, overwrite_rules=True)
+        self._rules_snapshot=copy.deepcopy(self.audio.rules)
+        self.refresh_table()
 
     def toggle_perf(self, c):
         if c:
@@ -764,7 +1319,12 @@ class CustomSettingsUI(QWidget):
     def open_rule_dir(self):
         d = self.audio.pack_dir
         if d and os.path.exists(d):
-            os.startfile(d)
+            if IS_WINDOWS:
+                os.startfile(d)
+            elif IS_MACOS:
+                subprocess.Popen(["open", d])
+            else:
+                subprocess.Popen(["xdg-open", d])
         else:
             QMessageBox.information(self, "提示", "尚未选择音效包，不存在规则集目录。")
 
@@ -791,6 +1351,7 @@ class VirtualKeyboardApp(QWidget):
         self.buttons = {}
         self.pressed_keys = set()
         self._last_fg_hwnd = 0
+        self._global_hook = None
         self.locked_modifiers = set()
 
         self.key_sig = KeySignal()
@@ -810,17 +1371,23 @@ class VirtualKeyboardApp(QWidget):
         self.init_tray()
         self.settings_dialog = CustomSettingsUI(self)
         self.start_keyboard_hook()
+        QTimer.singleShot(500, lambda: show_macos_permission_warning(self))
 
     def _track_fg(self):
         """★ 记住最后一个非自身的前台窗口"""
         try:
-            hwnd = user32.GetForegroundWindow()
-            my = int(self.winId())
-            sd = 0
-            if hasattr(self,'settings_dialog') and self.settings_dialog.isVisible():
-                sd = int(self.settings_dialog.winId())
-            if hwnd and hwnd != my and hwnd != sd:
-                self._last_fg_hwnd = hwnd
+            if IS_WINDOWS:
+                hwnd = user32.GetForegroundWindow()
+                my = int(self.winId())
+                sd = 0
+                if hasattr(self,'settings_dialog') and self.settings_dialog.isVisible():
+                    sd = int(self.settings_dialog.winId())
+                if hwnd and hwnd != my and hwnd != sd:
+                    self._last_fg_hwnd = hwnd
+            elif IS_MACOS and AppKit:
+                app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+                if app and app.processIdentifier() != os.getpid():
+                    self._last_fg_hwnd = app
         except: pass
 
     def init_tray(self):
@@ -942,6 +1509,10 @@ class VirtualKeyboardApp(QWidget):
         mods = list(self.locked_modifiers)
         target = self._last_fg_hwnd
 
+        # macOS 的 CapsLock 是状态键；这里已用于切换 OCT 音效模式，不再额外模拟系统 CapsLock。
+        if IS_MACOS and key == 'caps':
+            target = None
+
         if target:
             threading.Thread(
                 target=simulate_keys,
@@ -1008,7 +1579,11 @@ class VirtualKeyboardApp(QWidget):
 
     def open_settings(self): self.settings_dialog.show(); self.settings_dialog.raise_()
     def toggle_vis(self): self.hide() if self.isVisible() else self.show()
-    def quit_app(self): keyboard.unhook_all(); QApplication.quit()
+    def quit_app(self):
+        stop_key_hook(self._global_hook)
+        self._global_hook = None
+        unhook_all_keys()
+        QApplication.quit()
 
     def mousePressEvent(self, e):
         if e.button()==Qt.LeftButton: self._drag_pos=e.globalPos()-self.frameGeometry().topLeft()
@@ -1024,12 +1599,18 @@ class VirtualKeyboardApp(QWidget):
                 if self.settings_dialog.isActiveWindow(): return
             k=normalize_key(e.name, getattr(e,'scan_code',None))
             if not k: return
-            if e.event_type==keyboard.KEY_DOWN:
+            if e.event_type==KeyEvent.KEY_DOWN:
                 if k not in self.pressed_keys:
                     self.pressed_keys.add(k); self.key_sig.pressed.emit(k)
-            elif e.event_type==keyboard.KEY_UP:
+            elif e.event_type==KeyEvent.KEY_UP:
                 self.pressed_keys.discard(k); self.key_sig.released.emit(k)
-        keyboard.hook(on_hook)
+        self._global_hook = start_global_key_hook(on_hook)
+        if self._global_hook is None:
+            QMessageBox.warning(
+                self,
+                "键盘监听未启动",
+                "未能启动全局键盘监听，请确认依赖安装完整并检查系统权限。"
+            )
 
     def _cleanup_stuck(self):
         for k,b in self.buttons.items():
