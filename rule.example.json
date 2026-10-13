@@ -10,5 +10,17 @@
     "space": {
         "file": "path_to_audio2.ogg",
         "enabled": true
+    },
+    "n7": {
+        "file": "path_to_audio3.mp3",
+        "enabled": true
+    },
+    "pgup": {
+        "file": "path_to_audio4.flac",
+        "enabled": true
+    },
+    "vol-": {
+        "file": "path_to_audio5.mp3",
+        "enabled": true
     }
 }
