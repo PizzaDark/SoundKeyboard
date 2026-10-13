@@ -1,5 +1,9 @@
 PyQt5>=5.15.0
-keyboard>=0.13.5
+keyboard>=0.13.5; platform_system != "Darwin"
+pynput>=1.7.7; platform_system == "Darwin"
+pyobjc-framework-Cocoa>=10.0; platform_system == "Darwin"
+pyobjc-framework-Quartz>=10.0; platform_system == "Darwin"
+pyobjc-framework-ApplicationServices>=10.0; platform_system == "Darwin"
 pygame>=2.5.2
 numpy>=1.24.0
 pyinstaller>=6.3.0

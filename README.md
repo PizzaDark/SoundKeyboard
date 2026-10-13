@@ -26,10 +26,11 @@
 
 ```text
 ├── main.py                       # 主程序入口
-├── build.spec                    # PyInstaller 打包配置
+├── build.spec                    # PyInstaller 打包配置（Windows）
 ├── requirements.txt              # Python 依赖列表
 ├── rule.example.json             # 示例规则映射配置文件
 ├── run.bat                       # Windows 快速启动脚本
+├── run.command                   # macOS 快速启动脚本
 ├── README.md                     # README 文件
 └── LICENSE                       # 许可证文件
 ```
@@ -38,21 +39,27 @@
 
 ## 环境要求
 
-- **操作系统**: Windows 7/10/11（推荐 Windows 10/11）
+- **操作系统**: Windows 7/10/11（推荐 Windows 10/11）、macOS 12 或更高版本
 - **Python**: 3.10 或更高版本 (若使用源码运行)
-- **底层依赖**: 依赖 Windows API (Win32) 进行窗口前台及按键模拟操作，目前仅支持 Windows 系统。
+- **底层依赖**:
+  - Windows: 使用 Win32 API 和 `keyboard` 进行前台窗口恢复、全局按键监听与按键模拟。
+  - macOS: 使用 Quartz Event Tap 进行全局按键监听，使用 `pynput` 模拟按键，并通过 PyObjC/AppKit 尝试恢复前台应用。
 
 ## 快速开始
 
 ### 运行发布版本（EXE）
 下载最新版本的 `.exe` 和音效包压缩包，解压音效包后把文件夹和 `.exe` 放到同目录下双击运行主程序即可。
 
+> `.exe` 发布版本仅适用于 Windows。macOS 请使用源码运行，或自行用 PyInstaller 打包 `.app`。
+
 ### 从源码运行
 
-**方法一**：
+#### Windows
+
+**方法一：**
 在 Windows 环境下，直接双击运行项目目录中的 [`run.bat`](run.bat)。
 
-**方法二（手动纯命令行操作）**：
+**方法二：手动命令行运行**
 
 1. **克隆或下载项目**
    
@@ -67,7 +74,6 @@
    # 推荐使用 Python 3.10+
    python -m venv .venv
    .venv\Scripts\activate # Windows
-   source .venv/bin/activate # macOS/Linux
    
    pip install -r requirements.txt
    ```
@@ -78,13 +84,88 @@
    python main.py
    ```
 
+#### macOS
+
+**方法一：**
+在 macOS 环境下，直接双击运行项目目录中的 [`run.command`](run.command)。
+
+如果系统提示无法打开，先在终端中执行一次：
+
+   ```bash
+   chmod +x run.command
+   ```
+
+**方法二：手动命令行运行**
+
+1. **克隆或下载项目**
+
+   ```bash
+   git clone https://github.com/PizzaDark/SoundKeyboard.git
+   cd SoundKeyboard
+   ```
+
+2. **安装依赖**
+
+   ```bash
+   # 推荐使用 Python 3.10+
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. **授予系统权限**
+
+   首次运行前，打开 macOS 的 **系统设置 > 隐私与安全性**，给当前启动程序的应用授予权限。
+
+   - 双击 `run.command` 启动时，通常需要给 **Terminal** 授权。
+   - 从 iTerm2、Trae、Cursor、VS Code 等工具里启动时，需要给对应工具授权。
+   - 这不是每次都要重新授权；macOS 会按“实际启动程序”分别记录权限。换一种启动方式时，需要给新的启动程序授权一次。
+
+   需要开启的权限：
+
+   - **辅助功能**
+   - **输入监控**
+
+   程序启动时也会主动检测权限并弹出提示。开启权限后，请完全退出程序和启动它的终端/编辑器，再重新打开。
+
+4. **运行程序**
+
+   ```bash
+   python main.py
+   ```
+
+##### macOS 已知差异
+
+- macOS 的系统安全策略会限制全局键盘监听和模拟输入，必须授予“辅助功能”和“输入监控”权限。
+- macOS 版本中，虚拟键盘上的 `CAPS` 按钮只切换软件内的 OCT 音效模式，不额外切换系统 Caps Lock 状态。
+- 点击虚拟键盘时，程序会尝试把输入发送回之前的前台 App；如果目标 App 或系统权限拦截，可能只播放音效而不输入字符。
+- 菜单栏托盘行为由 Qt 和 macOS 系统共同控制，和 Windows 系统托盘表现可能略有不同。
+
 ## 音效包与规则配置指南
 
 本软件使用“音效包”文件夹的形式来管理音效。一个标准的音效包文件夹内包含你所需要的音频文件，并在根目录包含一个 `rule.json` 文件：
 
+- 程序启动时会优先自动查找并加载 `sound` 目录中的音效包，支持以下目录结构：
+
+  ```text
+  SoundKeyboard/
+  ├── main.py
+  └── sound/
+      ├── default/
+      │   ├── rule.json
+      │   ├── key.mp3
+      │   └── ...
+      └── another-pack/
+          └── rule.json
+  ```
+
+- `sound` 目录既可以放在项目内部，也可以放在项目同级目录。程序会扫描其中包含 `rule.json` 的子目录。
+- 如果发现多个音效包，首次启动按目录名称排序选择一个；之后会记住你在“当前音效包”里选择的音效包，不会在下次启动时自动覆盖。
+- 你可以在设置面板的 **音效与模式** 中通过“当前音效包”下拉框切换音效包。
 - 你可以在软件的“音效自定义”界面中点击 **+添加**，双击捕获按键并选择本地音频文件。
 - 点击 **保存** 后，程序会自动生成或更新当前挂载的音效包的 `rule.json`。
-- 点击设置面板的 **导入音效包** 选择其他文件夹，即可无缝切换不同的一套配置及音效。
+- 点击设置面板的 **导入音效包** 可以选择“音效包文件夹”，也可以直接选择 `rule.json`。macOS 的文件夹选择弹窗不会让你选中 JSON 文件，如果要导入 JSON，请使用菜单里的“选择 rule.json”。
 
 ## 构建可执行文件
 
@@ -96,6 +177,8 @@ pyinstaller build.spec
 
 打包完成后，独立的 `.exe` 程序及相关依赖将生成在 `dist/` 目录下。
 
+macOS 如需打包，可先确认源码运行正常，再参考 PyInstaller 的 macOS 打包方式创建 `.app`；当前仓库内的 `build.spec` 主要面向 Windows。
+
 ## 依赖库
 
 | 依赖包 | 用途 |
@@ -103,7 +186,9 @@ pyinstaller build.spec
 | PyQt5 | GUI 桌面界面与设置面板的构建交互 |
 | pygame | 高性能的音频混音器与按键音效播放引擎 |
 | numpy | 用于底层音频数据的矩阵处理、变调计算及倒放生成 |
-| keyboard | 全局键盘事件的底层捕获与注入回调 |
+| keyboard | Windows/Linux 全局键盘事件的底层捕获与注入回调 |
+| pynput | macOS 按键模拟 |
+| pyobjc-framework-Cocoa | macOS Quartz 键盘监听、权限检测与前台应用恢复 |
 
 ## 声明与开源许可证
 
