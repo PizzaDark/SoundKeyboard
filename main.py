@@ -7,7 +7,6 @@ import time
 import threading
 import tempfile
 import numpy as np
-import keyboard
 import pygame
 import pygame.sndarray
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
@@ -16,7 +15,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QCheckBox, QSlider, QSystemTrayIcon, QMenu, QAction,
                              QToolBox, QMessageBox, QAbstractItemView, QDialog)
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt5.QtGui import QIcon, QFont
+from PyQt5.QtGui import QIcon, QFont, QFontMetrics
 import ctypes
 import ctypes.wintypes
 
@@ -98,6 +97,17 @@ VK_MAP = {
     '5': 0x35, '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39,
     '-': 0xBD, '=': 0xBB, '[': 0xDB, ']': 0xDD, '\\': 0xDC,
     ';': 0xBA, "'": 0xDE, ',': 0xBC, '.': 0xBE, '/': 0xBF, '`': 0xC0,
+    'prtsc': 0x2C, 'scrlock': 0x91, 'pause': 0x13,
+    'pgup': 0x21, 'pgdn': 0x22,
+    'numlock': 0x90,
+    'n0': 0x60, 'n1': 0x61, 'n2': 0x62, 'n3': 0x63, 'n4': 0x64,
+    'n5': 0x65, 'n6': 0x66, 'n7': 0x67, 'n8': 0x68, 'n9': 0x69,
+    'n*': 0x6A, 'n+': 0x6B, 'n-': 0x6D, 'n.': 0x6E, 'n/': 0x6F,
+    'nenter': 0x0D,
+    'mute': 0xAD, 'vol-': 0xAE, 'vol+': 0xAF, 'calc': 0xB7,
+    'f13': 0x7C, 'f14': 0x7D, 'f15': 0x7E, 'f16': 0x7F,
+    'f17': 0x80, 'f18': 0x81, 'f19': 0x82, 'f20': 0x83,
+    'f21': 0x84, 'f22': 0x85, 'f23': 0x86, 'f24': 0x87,
 }
 
 # 需要 EXTENDEDKEY 标志的键
@@ -107,6 +117,8 @@ EXTENDED_KEYS = {
     0x2D, 0x2E,  # ins, del
     0x24, 0x23, 0x21, 0x22,  # home, end, pageup, pagedown
     0x26, 0x28, 0x25, 0x27,  # arrows
+    0x2C,  # prtsc
+    0x6F,  # 小键盘 /（扩展键）
 }
 
 # ★ 全局标志
@@ -182,52 +194,196 @@ def simulate_keys(key, modifier_keys=None, target_hwnd=None):
         _is_simulating = False
 
 
-# ===================== 键名规范化 =====================
-KEY_NAME_MAP = {}
-SCAN_CODE_MAP = {
-    42: 'shift', 54: 'rshift', 29: 'ctrl', 285: 'rctrl',
-    56: 'alt', 312: 'ralt', 91: 'win', 92: 'rwin',
-    347: 'win', 348: 'rwin', 58: 'caps', 57: 'space',
-    28: 'enter', 1: 'esc', 15: 'tab', 14: 'back',
-    339: 'del', 83: 'del', 338: 'ins', 82: 'ins',
+# ===================== 键名解析（原生 VK 表） =====================
+# keyboard 库对媒体键会给出不可靠的名字（如音量键被命名成 'D'/'C'），
+# 因此改用原生钩子直接读 VK + 扩展位，键名与界面/规则使用的完全一致
+VK_TO_KEY = {
+    0x08: 'back', 0x09: 'tab', 0x0D: 'enter', 0x13: 'pause', 0x14: 'caps',
+    0x1B: 'esc', 0x20: 'space',
+    0x21: 'pgup', 0x22: 'pgdn', 0x23: 'end', 0x24: 'home',
+    0x25: 'left', 0x26: 'up', 0x27: 'right', 0x28: 'down',
+    0x2D: 'ins', 0x2E: 'del',
+    0x5B: 'win', 0x5C: 'rwin', 0x5D: 'menu',
+    0x90: 'numlock', 0x91: 'scrlock',
+    0xA0: 'shift', 0xA1: 'rshift', 0xA2: 'ctrl', 0xA3: 'rctrl',
+    0xA4: 'alt', 0xA5: 'ralt',
+    0xAD: 'mute', 0xAE: 'vol-', 0xAF: 'vol+',
+    0xB0: 'next', 0xB1: 'prev', 0xB2: 'stop', 0xB3: 'play', 0xB5: 'media',
+    0xB7: 'calc',
+    0xBA: ';', 0xBB: '=', 0xBC: ',', 0xBD: '-', 0xBE: '.', 0xBF: '/',
+    0xC0: '`', 0xDB: '[', 0xDC: '\\', 0xDD: ']', 0xDE: "'",
+}
+for _i in range(10): VK_TO_KEY[0x30 + _i] = str(_i)        # 主键区数字
+for _i in range(26): VK_TO_KEY[0x41 + _i] = chr(97 + _i)   # 字母
+for _i in range(10): VK_TO_KEY[0x60 + _i] = 'n%d' % _i     # 小键盘数字
+VK_TO_KEY.update({0x6A: 'n*', 0x6B: 'n+', 0x6D: 'n-', 0x6E: 'n.', 0x6F: 'n/'})
+for _i in range(12): VK_TO_KEY[0x70 + _i] = 'f%d' % (_i + 1)
+for _i in range(12): VK_TO_KEY[0x7C + _i] = 'f%d' % (_i + 13)
+# 键名 → VK 码（调试行展示用；优先原生钩子的 VK 表，缺失时回落到 VK_MAP）
+_NAME_TO_VK = {name: vk for vk, name in VK_TO_KEY.items()}
+
+def vk_to_key(vk, extended, scan=0):
+    """虚拟键码(+扩展位+扫描码) → 规范键名"""
+    if vk in (0x10, 0x11, 0x12):  # Shift/Ctrl/Alt 通用码，靠扩展位分左右
+        base = {0x10: 'shift', 0x11: 'ctrl', 0x12: 'alt'}[vk]
+        return ('r' + base) if extended else base
+    if vk == 0x0D and extended: return 'nenter'  # 小键盘回车
+    if vk == 0x2C: return 'prtsc'
+    # NumLock 关闭的小键盘：vk 被系统译成导航键，但扫描码仍是小键盘区且无扩展位
+    # （真实导航键带扩展位，据此区分；使小键盘在任何 NumLock 状态下都按小键盘响应）
+    if not extended and scan in _NUMLOCK_OFF_NUMPAD:
+        return _NUMLOCK_OFF_NUMPAD[scan]
+    return VK_TO_KEY.get(vk)
+
+# NumLock 关闭时小键盘的扫描码 → 键名
+_NUMLOCK_OFF_NUMPAD = {
+    71: 'n7', 72: 'n8', 73: 'n9', 75: 'n4', 76: 'n5', 77: 'n6',
+    79: 'n1', 80: 'n2', 81: 'n3', 82: 'n0', 83: 'n.',
 }
 
-def _build_key_map():
-    pairs = [
-        (['spacebar', 'space'], 'space'),
-        (['return', 'enter', '\r', '\n'], 'enter'),
-        (['escape', 'esc'], 'esc'),
-        (['left shift', 'lshift', 'shift'], 'shift'),
-        (['right shift', 'rshift'], 'rshift'),
-        (['left ctrl', 'lctrl', 'ctrl', 'left control', 'control'], 'ctrl'),
-        (['right ctrl', 'rctrl', 'right control'], 'rctrl'),
-        (['left alt', 'lalt', 'alt'], 'alt'),
-        (['right alt', 'ralt', 'altgr'], 'ralt'),
-        (['left windows', 'left win', 'lwin', 'windows', 'win', 'left meta', 'cmd'], 'win'),
-        (['right windows', 'right win', 'rwin', 'right meta'], 'rwin'),
-        (['caps lock', 'capital', 'caps', 'capslock'], 'caps'),
-        (['backspace', 'back'], 'back'),
-        (['delete', 'del'], 'del'),
-        (['insert', 'ins'], 'ins'),
-        (['tab'], 'tab'),
-        (['menu', 'apps', 'context menu'], 'menu'),
-    ]
-    for names, canonical in pairs:
-        for n in names:
-            KEY_NAME_MAP[n] = canonical
-    for k, v in {'!':'1','@':'2','#':'3','$':'4','%':'5','^':'6','&':'7',
-                  '*':'8','(':'9',')':'0','_':'-','+':'=','{':'[','}':']',
-                  '|':'\\',':':';','"':"'",'<':',','>':'.','?':'/','~':'`'}.items():
-        KEY_NAME_MAP[k] = v
+# 旧版/常见键名别名 → 规范键名（加载 rule.json 时自动转换，保证旧音效包可用）
+RULE_KEY_ALIAS = {
+    'spacebar': 'space', 'return': 'enter',
+    'escape': 'esc',
+    'left shift': 'shift', 'lshift': 'shift', 'l_shift': 'shift', 'left_shift': 'shift',
+    'right shift': 'rshift', 'r_shift': 'rshift', 'right_shift': 'rshift',
+    'left ctrl': 'ctrl', 'lctrl': 'ctrl', 'left control': 'ctrl', 'control': 'ctrl', 'l_ctrl': 'ctrl', 'left_ctrl': 'ctrl',
+    'right ctrl': 'rctrl', 'right control': 'rctrl', 'r_ctrl': 'rctrl', 'right_ctrl': 'rctrl',
+    'left alt': 'alt', 'lalt': 'alt', 'l_alt': 'alt', 'left_alt': 'alt',
+    'right alt': 'ralt', 'altgr': 'ralt', 'r_alt': 'ralt', 'right_alt': 'ralt',
+    'left windows': 'win', 'left win': 'win', 'lwin': 'win', 'windows': 'win',
+    'left meta': 'win', 'cmd': 'win', 'l_win': 'win', 'left_win': 'win',
+    'right windows': 'rwin', 'right win': 'rwin', 'right meta': 'rwin', 'r_win': 'rwin', 'right_win': 'rwin',
+    'caps lock': 'caps', 'capital': 'caps', 'capslock': 'caps', 'caps_lock': 'caps',
+    'backspace': 'back', 'back_space': 'back',
+    'delete': 'del', 'insert': 'ins',
+    'print screen': 'prtsc', 'printscreen': 'prtsc', 'sys req': 'prtsc', 'print_screen': 'prtsc',
+    'scroll lock': 'scrlock', 'scrolllock': 'scrlock', 'scroll_lock': 'scrlock',
+    'page up': 'pgup', 'pageup': 'pgup', 'page_up': 'pgup',
+    'page down': 'pgdn', 'pagedown': 'pgdn', 'page_down': 'pgdn',
+    'num lock': 'numlock', 'number lock': 'numlock', 'num_lock': 'numlock',
+    'volume mute': 'mute', 'volume down': 'vol-', 'volume up': 'vol+',
+    'calculator': 'calc',
+    'menu key': 'menu', 'apps': 'menu', 'context menu': 'menu', 'application': 'menu',
+    'keypad enter': 'nenter', 'num enter': 'nenter', 'numpad enter': 'nenter',
+    'keypad /': 'n/', 'num /': 'n/', 'numpad /': 'n/', 'numpad divide': 'n/',
+    'keypad *': 'n*', 'num *': 'n*', 'numpad *': 'n*', 'numpad multiply': 'n*',
+    'keypad +': 'n+', 'num +': 'n+', 'numpad +': 'n+', 'numpad add': 'n+',
+    'keypad -': 'n-', 'num -': 'n-', 'numpad -': 'n-', 'numpad subtract': 'n-',
+    'keypad .': 'n.', 'num .': 'n.', 'numpad .': 'n.', 'numpad decimal': 'n.',
+    # 原版把 Shift+数字的符号名映射到数字键
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7',
+    '*': '8', '(': '9', ')': '0', '_': '-', '+': '=', '{': '[', '}': ']',
+    '|': '\\', ':': ';', '"': "'", '<': ',', '>': '.', '?': '/', '~': '`',
+}
+for _d in range(10):
+    for _p in ('keypad %d', 'num %d', 'numpad %d', 'numpad%d', 'num%d',
+               'keypad_%d', 'num_%d', 'numpad_%d', 'kp_%d', 'kp %d'):
+        RULE_KEY_ALIAS[_p % _d] = 'n%d' % _d
+# 小键盘运算符的各种写法（空格/下划线/英文全称）
+for _p in ('keypad enter', 'num enter', 'numpad enter', 'keypad_enter',
+           'num_enter', 'numpad_enter', 'kp_enter'):
+    RULE_KEY_ALIAS[_p] = 'nenter'
+for _p in ('keypad /', 'num /', 'numpad /', 'keypad_/', 'num_/', 'numpad_/',
+           'kp_/', 'numpad divide', 'num_divide', 'numpad_divide'):
+    RULE_KEY_ALIAS[_p] = 'n/'
+for _p in ('keypad *', 'num *', 'numpad *', 'keypad_*', 'num_*', 'numpad_*',
+           'kp_*', 'numpad multiply', 'num_multiply', 'numpad_multiply'):
+    RULE_KEY_ALIAS[_p] = 'n*'
+for _p in ('keypad +', 'num +', 'numpad +', 'keypad_+', 'num_+', 'numpad_+',
+           'kp_+', 'numpad add', 'num_add', 'numpad_add'):
+    RULE_KEY_ALIAS[_p] = 'n+'
+for _p in ('keypad -', 'num -', 'numpad -', 'keypad_-', 'num_-', 'numpad_-',
+           'kp_-', 'numpad subtract', 'num_subtract', 'numpad_subtract'):
+    RULE_KEY_ALIAS[_p] = 'n-'
+for _p in ('keypad .', 'num .', 'numpad .', 'keypad_.', 'num_.', 'numpad_.',
+           'kp_.', 'numpad decimal', 'num_decimal', 'numpad_decimal', 'decimal', 'point'):
+    RULE_KEY_ALIAS[_p] = 'n.'
+# 小键盘 r_ 前缀写法（用户的音效包风格）
+RULE_KEY_ALIAS.update({
+    'r_/': 'n/', 'r_*': 'n*', 'r_-': 'n-', 'r_+': 'n+', 'r_.': 'n.',
+    'r_enter': 'nenter',
+    'r0': 'n0', 'r1': 'n1', 'r2': 'n2', 'r3': 'n3', 'r4': 'n4',
+    'r5': 'n5', 'r6': 'n6', 'r7': 'n7', 'r8': 'n8', 'r9': 'n9',
+    'r_0': 'n0', 'r_1': 'n1', 'r_2': 'n2', 'r_3': 'n3', 'r_4': 'n4',
+    'r_5': 'n5', 'r_6': 'n6', 'r_7': 'n7', 'r_8': 'n8', 'r_9': 'n9',
+    'fn': 'menu',  # FN 槽位（规范名 menu）
+})
 
-_build_key_map()
+# 未识别按键调试日志：记录 vk/扫描码/扩展位，用于识别 FN 等特殊键
+_unknown_logged = set()
+def _log_unknown_key(vk, scan, extended):
+    if vk in _unknown_logged: return
+    _unknown_logged.add(vk)
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "key_debug.log")
+        with open(p, 'a', encoding='utf-8') as f:
+            f.write(f"未识别按键: vk=0x{vk:02X} scan=0x{scan:02X} extended={extended}\n")
+    except: pass
 
-def normalize_key(name, scan_code=None):
-    if scan_code and scan_code in SCAN_CODE_MAP:
-        return SCAN_CODE_MAP[scan_code]
-    if not name: return ""
-    name = str(name).strip().lower()
-    return KEY_NAME_MAP.get(name, name)
+# ===================== 原生底层键盘钩子 =====================
+WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x100, 0x101, 0x104, 0x105
+WH_KEYBOARD_LL, LLKHF_EXTENDED, WM_QUIT = 13, 0x01, 0x0012
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", ctypes.wintypes.DWORD), ("scanCode", ctypes.wintypes.DWORD),
+                ("flags", ctypes.wintypes.DWORD), ("time", ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+LRESULT = ctypes.wintypes.LPARAM
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int,
+                              ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+user32.CallNextHookEx.restype = LRESULT
+user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                  ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+
+class RawKeyHook:
+    """WH_KEYBOARD_LL 钩子：监听器收到 (规范键名, 是否按下)"""
+    def __init__(self):
+        self.listeners = []
+        self._proc = HOOKPROC(self._cb)  # 持有引用防止回调被 GC
+        self._thread = None
+        self._tid = 0
+
+    def add_listener(self, fn):
+        if fn not in self.listeners: self.listeners.append(fn)
+
+    def remove_listener(self, fn):
+        if fn in self.listeners: self.listeners.remove(fn)
+
+    def _cb(self, nCode, wParam, lParam):
+        if nCode == 0 and not _is_simulating:
+            try:
+                k = KBDLLHOOKSTRUCT.from_address(lParam)
+                down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                key = vk_to_key(k.vkCode, k.flags & LLKHF_EXTENDED, k.scanCode)
+                if key:
+                    for fn in list(self.listeners):
+                        try: fn(key, down)
+                        except: pass
+                elif down:
+                    _log_unknown_key(k.vkCode, k.scanCode, bool(k.flags & LLKHF_EXTENDED))
+            except: pass
+        return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC,
+                                             ctypes.wintypes.HINSTANCE, ctypes.wintypes.DWORD]
+        hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, None, 0)
+        if not hook: return
+        self._tid = kernel32.GetCurrentThreadId()
+        msg = ctypes.wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            pass
+        user32.UnhookWindowsHookEx(hook)
+
+    def stop(self):
+        if self._tid: user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
 
 
 def get_resource_path(relative_path):
@@ -235,6 +391,22 @@ def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath(os.path.dirname(__file__)), relative_path)
+
+# ===================== 配置持久化 =====================
+BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
+
+def load_app_settings():
+    """读取上次的配置（音效包/主题/尺寸/不透明度/窗口位置）"""
+    try:
+        with open(os.path.join(BASE_DIR, 'settings.json'), 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except: return {}
+
+def save_app_settings(d):
+    try:
+        with open(os.path.join(BASE_DIR, 'settings.json'), 'w', encoding='utf-8') as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
+    except: pass
 
 class KeySignal(QObject):
     pressed = pyqtSignal(str)
@@ -299,9 +471,13 @@ class AudioEngine:
         self.pack_dir = ""
         self.is_performance_mode = False
         self.performance_sounds = {}
+        self.performance_file = ''
         self.space_channel = None
         self.shift_reverse = False
         self.caps_octave_down = False
+        # 趣味变调模式开关（默认关闭；开启后 Shift=倒放、CapsLock=低八度）
+        self.reverse_enabled = False
+        self.octave_enabled = False
         self.space_playing = False
         self.space_start_time = 0.0
         self.current_space_snd = None
@@ -322,7 +498,20 @@ class AudioEngine:
             else:
                 try:
                     with open(rp, 'r', encoding='utf-8') as f:
-                        self.rules = json.load(f)
+                        loaded = json.load(f)
+                    # 旧版键名（left shift / volume mute / num 7 等）自动转换为规范键名，
+                    # 键名统一小写；规范名条目优先，别名不覆盖已有的规范条目
+                    self.rules = {}
+                    aliased = {}
+                    for k, v in loaded.items():
+                        kk = str(k).strip().lower()
+                        ck = RULE_KEY_ALIAS.get(kk, kk)
+                        if ck == k:
+                            self.rules[ck] = v
+                        else:
+                            aliased.setdefault(ck, v)
+                    for ck, v in aliased.items():
+                        self.rules.setdefault(ck, v)
                 except: pass
         else:
             self.save_rules()
@@ -376,20 +565,41 @@ class AudioEngine:
     def toggle_caps(self): self.caps_octave_down = not self.caps_octave_down
     def toggle_shift(self): self.shift_reverse = not self.shift_reverse
 
+    # 小键盘键无专属音效时回落到主键区同名键（原版行为：小键盘数字与主键区共用音效）
+    # 注：小键盘 / 和 . 不回落，保持静音（按用户要求）
+    NUMPAD_FALLBACK = {f'n{d}': str(d) for d in range(10)}
+    NUMPAD_FALLBACK.update({'n+': '+', 'n-': '-', 'nenter': 'enter'})
+
     def _delayed_space_pause(self):
         if not self.space_playing and self.space_channel:
             self.space_channel.pause()
 
     def play_key(self, key):
-        if key == 'caps': self.toggle_caps(); return
-        if key in ('shift','rshift'): self.toggle_shift(); return
-        if self.is_performance_mode:
-            if key in self.performance_sounds: self.performance_sounds[key].play()
-            return
+        """播放按键音效；返回 (是否播放, 音效名, 说明) 供主界面调试行展示"""
+        # 仅在设置里开启趣味模式时，Shift/CapsLock 才切换变调；默认只播音效
+        if key == 'caps' and self.octave_enabled: self.toggle_caps()
+        if key in ('shift','rshift') and self.reverse_enabled: self.toggle_shift()
+        if self.is_performance_mode and key not in ('caps','shift','rshift'):
+            if key in self.performance_sounds:
+                self.performance_sounds[key].play()
+                return True, self.performance_file, '演奏模式'
+            return False, '', '演奏模式未覆盖该键'
         cfg = self.rules.get(key, {})
-        if not cfg.get("enabled", True): return
+        snd_name = os.path.basename(cfg.get('file') or '')
+        if key in self.rules and not cfg.get("enabled", True):
+            return False, snd_name, '音效已停用'
         snd = self._get_sound(key)
-        if not snd: return
+        fb_used = ''
+        if snd is None and key in self.NUMPAD_FALLBACK:
+            fb = self.NUMPAD_FALLBACK[key]
+            if self.rules.get(fb, {}).get("enabled", True):
+                snd = self._get_sound(fb)
+                if snd is not None:
+                    fb_used = fb
+                    snd_name = os.path.basename(self.rules.get(fb, {}).get('file') or '') or fb
+        if not snd:
+            detail = '音频文件加载失败' if (key in self.rules and cfg.get('file')) else '未绑定音效'
+            return False, snd_name, detail
         if key == 'space':
             self.space_playing = True
             self.space_start_time = time.time()
@@ -404,6 +614,13 @@ class AudioEngine:
         else:
             ch = pygame.mixer.find_channel(True)
             if ch: ch.play(snd)
+        if fb_used:
+            return True, snd_name, f'正常播放（回落 {fb_used} 音效）'
+        variant = ''
+        if self.shift_reverse and self.caps_octave_down: variant = '（倒放+低八度）'
+        elif self.shift_reverse: variant = '（倒放）'
+        elif self.caps_octave_down: variant = '（低八度）'
+        return True, snd_name, '正常播放' + variant
 
     def release_key(self, key):
         if key == 'space' and self.space_playing:
@@ -417,6 +634,7 @@ class AudioEngine:
 
     def load_performance_key(self, filepath):
         try:
+            self.performance_file = os.path.basename(filepath)
             snd = pygame.mixer.Sound(filepath)
             data = pygame.sndarray.array(snd)
             
@@ -453,7 +671,6 @@ class KeyCaptureDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
         self.setFixedSize(320, 150)
         self.captured_key = ""
-        self._hook_id = None
         layout = QVBoxLayout(self)
         self.label = QLabel("请按下要绑定的按键...")
         self.label.setAlignment(Qt.AlignCenter)
@@ -482,21 +699,26 @@ class KeyCaptureDialog(QDialog):
     def keyPressEvent(self, e): pass
     def keyReleaseEvent(self, e): pass
 
+    def _vkb(self):
+        p = self.parent()
+        return getattr(p, 'parent_vkb', None) if p else None
+
     def showEvent(self, e):
-        super().showEvent(e)
-        self._hook_id = keyboard.on_press(self._on_key)
+        vkb = self._vkb()
+        if vkb is not None and hasattr(vkb, 'raw_hook'):
+            vkb.raw_hook.add_listener(self._on_key)
 
     def hideEvent(self, e):
-        if self._hook_id:
-            keyboard.unhook(self._hook_id); self._hook_id = None
+        vkb = self._vkb()
+        if vkb is not None and hasattr(vkb, 'raw_hook'):
+            vkb.raw_hook.remove_listener(self._on_key)
         super().hideEvent(e)
 
-    def _on_key(self, e):
-        k = normalize_key(e.name, getattr(e, 'scan_code', None))
-        if k:
-            self.captured_key = k
-            self.lbl_key.setText(k.upper())
-            self.btn_ok.setEnabled(True)
+    def _on_key(self, key, down):
+        if not down or not key: return
+        self.captured_key = key
+        self.lbl_key.setText(key.upper())
+        self.btn_ok.setEnabled(True)
 
 
 class ReadOnlyItem(QTableWidgetItem):
@@ -558,7 +780,7 @@ class CustomSettingsUI(QWidget):
         self.sl_op.valueChanged.connect(lambda v: self.lbl_o.setText(f"{v}%"))
         ho.addWidget(self.sl_op); ho.addWidget(self.lbl_o); v2.addLayout(ho)
 
-        info_v2 = QLabel("请先到【音效与模式】中导入现有音效包或在【音效自定义】中绑定按键\n按下Shift：倒放\n按下CapsLock：水牛音")
+        info_v2 = QLabel("请先到【音效与模式】中导入现有音效包或在【音效自定义】中绑定按键\n倒放/水牛音等趣味模式可在【音效与模式】页开启（默认关闭）")
         info_v2.setStyleSheet("color:#999;font-size:11px;padding:8px;")
         v2.addWidget(info_v2); v2.addStretch()
         self.toolbox.addItem(p2, "🖥️ 外观")
@@ -570,9 +792,15 @@ class CustomSettingsUI(QWidget):
         self.btn_perf = QPushButton("🎹 开启演奏模式")
         self.btn_perf.setCheckable(True)
         self.btn_perf.toggled.connect(self.toggle_perf)
+        self.chk_rev = QCheckBox("⇧ Shift 切换倒放模式（默认关闭）")
+        self.chk_oct = QCheckBox("Caps Lock 切换低八度水牛音（默认关闭）")
+        self.chk_rev.toggled.connect(lambda c: setattr(self.audio, 'reverse_enabled', c))
+        self.chk_oct.toggled.connect(lambda c: setattr(self.audio, 'octave_enabled', c))
         info_v1 = QLabel("使用此功能，确保在音效包文件夹中有key.mp3/ogg/wav/flac\n开启后按ASD...K键")
         info_v1.setStyleSheet("color:#999;font-size:11px;padding:8px;")
-        v1.addWidget(self.btn_load); v1.addWidget(self.btn_perf); v1.addWidget(info_v1); v1.addStretch()
+        v1.addWidget(self.btn_load); v1.addWidget(self.btn_perf)
+        v1.addWidget(self.chk_rev); v1.addWidget(self.chk_oct)
+        v1.addWidget(info_v1); v1.addStretch()
         self.toolbox.addItem(p1, "🎵 音效与模式")
 
         # 3) 规则
@@ -681,6 +909,7 @@ class CustomSettingsUI(QWidget):
                 self.audio.load_pack(f, overwrite_rules=True)
                 self._rules_snapshot=copy.deepcopy(self.audio.rules)
                 self.refresh_table()
+                self.parent_vkb._save_settings()
 
     def toggle_perf(self, c):
         if c:
@@ -789,7 +1018,19 @@ class VirtualKeyboardApp(QWidget):
         self.theme_color = "#FF8C00"
         self.base_size = 40
         self.buttons = {}
+
+        # ★ 恢复上次配置：音效包 + 界面尺寸（在构建界面前应用）
+        self._saved = load_app_settings()
+        _pd = self._saved.get('pack_dir', '')
+        if _pd and os.path.exists(os.path.join(_pd, 'rule.json')):
+            try: self.audio.load_pack(_pd)
+            except: pass
+        if 'scale' in self._saved:
+            try: self.base_size = max(20, min(70, int(self._saved['scale'])))
+            except: pass
         self.pressed_keys = set()
+        self.mouse_pressed_keys = set()  # 鼠标按住中的虚拟键（豁免卡键清理定时器）
+        self._press_ts = {}  # 每个键最近一次点亮时间（保证按下效果最少可见时长）
         self._last_fg_hwnd = 0
         self.locked_modifiers = set()
 
@@ -810,6 +1051,42 @@ class VirtualKeyboardApp(QWidget):
         self.init_tray()
         self.settings_dialog = CustomSettingsUI(self)
         self.start_keyboard_hook()
+        self._apply_saved_settings()
+
+    def _apply_saved_settings(self):
+        """恢复主题/不透明度/窗口位置/趣味模式（需在设置面板创建后调用）"""
+        st = self._saved
+        try:
+            if 'theme_idx' in st:
+                self.settings_dialog.combo_theme.setCurrentIndex(int(st['theme_idx']))
+            if 'scale' in st:
+                self.settings_dialog.sl_scale.setValue(self.base_size)
+            if 'opacity' in st:
+                self.settings_dialog.sl_op.setValue(max(20, min(100, int(st['opacity']))))
+            self.settings_dialog.chk_rev.setChecked(bool(st.get('reverse_mode', False)))
+            self.settings_dialog.chk_oct.setChecked(bool(st.get('octave_mode', False)))
+            if st.get('classic_layout', False):
+                self.toggle_layout()
+            pos = st.get('pos')
+            if pos and len(pos) == 2:
+                g = QApplication.desktop().availableGeometry()
+                self.move(min(max(int(pos[0]), g.left()), g.right()-200),
+                          min(max(int(pos[1]), g.top()), g.bottom()-100))
+        except: pass
+
+    def _save_settings(self):
+        """保存当前配置，下次启动自动恢复"""
+        sd = self.settings_dialog if hasattr(self, 'settings_dialog') else None
+        save_app_settings({
+            'pack_dir': getattr(self.audio, 'pack_dir', '') or '',
+            'theme_idx': sd.combo_theme.currentIndex() if sd else 0,
+            'scale': self.base_size,
+            'opacity': round(self.windowOpacity()*100),
+            'pos': [self.x(), self.y()],
+            'reverse_mode': bool(getattr(self.audio, 'reverse_enabled', False)),
+            'octave_mode': bool(getattr(self.audio, 'octave_enabled', False)),
+            'classic_layout': bool(getattr(self, 'use_classic_layout', False)),
+        })
 
     def _track_fg(self):
         """★ 记住最后一个非自身的前台窗口"""
@@ -845,10 +1122,12 @@ class VirtualKeyboardApp(QWidget):
 
         self.lbl_rev = QLabel("REV"); self.lbl_rev.setFixedSize(35,18)
         self.lbl_rev.setAlignment(Qt.AlignCenter); self.lbl_rev.setFont(QFont("Arial",7,QFont.Bold))
+        self.lbl_rev.setToolTip("倒放模式指示：设置中开启后，按 Shift 键切换")
         top.addWidget(self.lbl_rev)
 
         self.lbl_oct = QLabel("OCT↓"); self.lbl_oct.setFixedSize(40,18)
         self.lbl_oct.setAlignment(Qt.AlignCenter); self.lbl_oct.setFont(QFont("Arial",7,QFont.Bold))
+        self.lbl_oct.setToolTip("低八度模式指示：设置中开启后，按 CapsLock 键切换")
         top.addWidget(self.lbl_oct)
 
         # ★ 组合键锁按钮
@@ -856,21 +1135,89 @@ class VirtualKeyboardApp(QWidget):
         for mn, ml in [('ctrl','Ctrl'),('shift','Shift'),('alt','Alt')]:
             b = QPushButton(ml); b.setFixedSize(42,18)
             b.setFont(QFont("Arial",7,QFont.Bold))
+            b.setToolTip(f"组合键锁：点击锁定 {ml}，再点虚拟按键可发送组合键")
             b.setCheckable(True); b.setFocusPolicy(Qt.NoFocus)
             b.toggled.connect(lambda c, m=mn: self._toggle_mod(m, c))
             self.mod_btns[mn] = b; top.addWidget(b)
 
+        # ★ 布局切换按钮（经典 6 行 / 108 键）
+        self.btn_layout = QPushButton("经典"); self.btn_layout.setFixedSize(42,18)
+        self.btn_layout.setFont(QFont("Microsoft YaHei", 7, QFont.Bold))
+        self.btn_layout.setFocusPolicy(Qt.NoFocus)
+        self.btn_layout.setToolTip("当前：108 键布局，点击切换为经典 6 行布局")
+        self.btn_layout.clicked.connect(self.toggle_layout)
+        top.addWidget(self.btn_layout)
+
         self.btn_gear = QPushButton("⚙️"); self.btn_gear.setFixedSize(30,22)
         self.btn_gear.setFocusPolicy(Qt.NoFocus)
+        self.btn_gear.setToolTip("打开设置")
         self.btn_gear.clicked.connect(self.open_settings)
         top.addWidget(self.btn_gear)
+
+        # ★ 隐藏窗口按钮（与托盘右键“显示/隐藏”一致，托盘可恢复）
+        self.btn_hide = QPushButton("—"); self.btn_hide.setFixedSize(30,22)
+        self.btn_hide.setFocusPolicy(Qt.NoFocus)
+        self.btn_hide.setToolTip("隐藏键盘（托盘双击或右键恢复）")
+        self.btn_hide.clicked.connect(self.hide)
+        top.addWidget(self.btn_hide)
         self.main_layout.addLayout(top)
 
         self.kb_container = QWidget(); self.kb_container.setObjectName("KBC")
-        self.kb_layout = QVBoxLayout(self.kb_container)
-        self.kb_layout.setContentsMargins(10,10,10,10)
 
-        self.rows_def = [
+        # ★ 两套布局：108 键变体（默认）/ 原版经典 6 行，右上角按钮随时切换
+        # 108 键布局：MUTE/VOL-/VOL+/F13 占功能行的小键盘位置，小键盘整体下移一行
+        # 每行总宽均为 22.5u（去掉旧扩展列的空隙后收紧，按键等比加宽填满窗口）
+        _G = 0.25  # 功能区之间的间隔
+        self.LAYOUT_108 = [
+            # 第1行：ESC + F区 + PrtSc/ScrLk/Pause + 媒体键横排（小键盘上方）
+            [('esc','ESC',1),(None,'',2/3),
+             ('f1','F1',1),('f2','F2',1),('f3','F3',1),('f4','F4',1),(None,'',2/3),
+             ('f5','F5',1),('f6','F6',1),('f7','F7',1),('f8','F8',1),(None,'',2/3),
+             ('f9','F9',1),('f10','F10',1),('f11','F11',1),('f12','F12',1),
+             (None,'',_G),
+             ('prtsc','PrtSc',1),('scrlock','ScrLk',1),('pause','Pause',1),
+             (None,'',_G),
+             ('mute','MUTE',1),('vol-','VOL-',1),('vol+','VOL+',1),('f13','F13',1)],
+            # 第2行：数字行 + Ins/Home/PgUp + 小键盘 NumLk / * -
+            [('`','~',1),('1','1',1),('2','2',1),('3','3',1),('4','4',1),('5','5',1),
+             ('6','6',1),('7','7',1),('8','8',1),('9','9',1),('0','0',1),('-','-',1),
+             ('=','=',1),('back','⌫',2),
+             (None,'',_G),
+             ('ins','INS',1),('home','HOME',1),('pgup','PGUP',1),
+             (None,'',_G),
+             ('numlock','NumLk',1),('n/','/',1),('n*','*',1),('n-','-',1)],
+            # 第3行：Tab行 + Del/End/PgDn + 小键盘 789+（+ 跨两行）
+            [('tab','TAB',1.5),('q','Q',1),('w','W',1),('e','E',1),('r','R',1),
+             ('t','T',1),('y','Y',1),('u','U',1),('i','I',1),('o','O',1),
+             ('p','P',1),('[','[',1),(']',']',1),('\\','\\',1.5),
+             (None,'',_G),
+             ('del','DEL',1),('end','END',1),('pgdn','PGDN',1),
+             (None,'',_G),
+             ('n7','7',1),('n8','8',1),('n9','9',1),('n+','+',1)],
+            # 第4行：Caps行 + 空位 + 小键盘 456
+            [('caps','CAPS',1.75),('a','A',1),('s','S',1),('d','D',1),('f','F',1),
+             ('g','G',1),('h','H',1),('j','J',1),('k','K',1),('l','L',1),
+             (';',';',1),("'","'",1),('enter','⏎',2.25),
+             (None,'',3.5),
+             ('n4','4',1),('n5','5',1),('n6','6',1),(None,'',1)],
+            # 第5行：Shift行 + ↑ + 小键盘 123 Enter（Enter 跨两行）
+            [('shift','⇧SHIFT',2.25),('z','Z',1),('x','X',1),('c','C',1),('v','V',1),
+             ('b','B',1),('n','N',1),('m','M',1),(',',',',1),('.','.', 1),
+             ('/','/',1),('rshift','SHIFT⇧',2.75),
+             (None,'',_G),
+             (None,'',1),('up','▲',1),(None,'',1),
+             (None,'',_G),
+             ('n1','1',1),('n2','2',1),('n3','3',1),('nenter','⏎',1)],
+            # 第6行：底行（含右修饰键）+ 方向键 + 小键盘 0.
+            [('ctrl','CTRL',1.25),('win','WIN',1.25),('alt','ALT',1.25),
+             ('space','',6.25),('ralt','ALT',1.25),('rwin','WIN',1.25),
+             ('menu','FN',1.25),('rctrl','CTRL',1.25),
+             (None,'',_G),('left','◀',1),('down','▼',1),('right','▶',1),
+             (None,'',_G),
+             ('n0','0',2),('n.','.',1),(None,'',1)]
+        ]
+        # 经典布局：原版 6 行（无小键盘/导航区/媒体键/右修饰键），每行 15u
+        self.LAYOUT_CLASSIC = [
             [('esc','ESC',1),('f1','F1',1),('f2','F2',1),('f3','F3',1),('f4','F4',1),
              ('f5','F5',1),('f6','F6',1),('f7','F7',1),('f8','F8',1),('f9','F9',1),
              ('f10','F10',1),('f11','F11',1),('f12','F12',1),('ins','INS',1),('del','DEL',1)],
@@ -887,28 +1234,74 @@ class VirtualKeyboardApp(QWidget):
              ('b','B',1),('n','N',1),('m','M',1),(',',',',1),('.','.', 1),
              ('/','/',1),('rshift','SHIFT⇧',2.75)],
             [('ctrl','CTRL',1.25),('win','WIN',1.25),('alt','ALT',1.25),
-             ('space','',6.25),('left','◀',1.25),('up','▲',1.25),
-             ('down','▼',1.25),('right','▶',1.25)]
+             ('space','',6.25),('left','◀',1.25),
+             ('up','▲',1.25),('down','▼',1.25),('right','▶',1.25)]
         ]
+        self.use_classic_layout = False
 
-        self.row_layouts = []
-        for row in self.rows_def:
-            hl = QHBoxLayout(); hl.setSpacing(0)
-            for rk, dt, wm in row:
-                btn = QPushButton(dt)
-                btn.setProperty("width_mult", wm)
-                btn.setProperty("is_pressed", False)
-                btn.setFocusPolicy(Qt.NoFocus)
-                self.buttons[rk] = btn
-                hl.addWidget(btn)
-                # ★ 用 pressed/released 实现完整按下-释放体验
-                btn.pressed.connect(lambda k=rk: self._vk_press(k))
-                btn.released.connect(lambda k=rk: self._vk_release(k))
-            self.kb_layout.addLayout(hl)
-            self.row_layouts.append(hl)
+        # 绝对定位：按每行起始宽度单位直接摆放，保证小键盘/导航区跨行严格对齐
+        # (None, '', w) 为占位间隔，不生成控件
+        self._key_geom = {}  # rk -> (行号, 起始单位, 宽度单位)
+        self._build_keyboard()
 
         self.main_layout.addWidget(self.kb_container)
+
+        # ★ 调试信息行：显示最近按下按键的 键码/关联音效/播放结果，5 秒无操作自动还原
+        self.lbl_debug = QLabel()
+        self.lbl_debug.setObjectName("DBG")
+        self.lbl_debug.setAlignment(Qt.AlignCenter)
+        _fd = QFont("Microsoft YaHei"); _fd.setPixelSize(12); _fd.setBold(True)
+        self.lbl_debug.setFont(_fd)
+        self._debug_full = ''
+        self._debug_color = '#8a8a8a'
+        self._debug_timer = QTimer(self)
+        self._debug_timer.setSingleShot(True)
+        self._debug_timer.timeout.connect(self._debug_idle)
+        self._debug_idle()
+        self.main_layout.addWidget(self.lbl_debug)
+
         self.update_scale(self.base_size)
+
+    def _build_keyboard(self):
+        """按当前布局重建键盘按钮（108 键变体 / 原版经典 6 行）"""
+        for btn in self.buttons.values():
+            btn.setParent(None); btn.deleteLater()
+        self.buttons.clear(); self._key_geom.clear(); self._press_ts.clear()
+        rows = self.LAYOUT_CLASSIC if self.use_classic_layout else self.LAYOUT_108
+        for ri, row in enumerate(rows):
+            pos = 0.0
+            for rk, dt, wm in row:
+                if rk is not None:
+                    btn = QPushButton(dt, self.kb_container)
+                    btn.show()  # 切换布局时父容器已可见，新控件必须显式 show 才会显示
+                    btn.setProperty("width_mult", wm)
+                    btn.setProperty("is_pressed", False)
+                    btn.setFocusPolicy(Qt.NoFocus)
+                    self.buttons[rk] = btn
+                    self._key_geom[rk] = (ri, pos, wm)
+                    # ★ 用 pressed/released 实现完整按下-释放体验
+                    btn.pressed.connect(lambda k=rk: self._vk_press(k))
+                    btn.released.connect(lambda k=rk: self._vk_release(k))
+                pos += wm
+        self._total_units = pos  # 各行单位总数一致
+        self._n_rows = len(rows)
+        # 跨行键：108 布局中小键盘 + / Enter 占两行高度（真实键盘造型）
+        self._row_span = {} if self.use_classic_layout else {'n+': 2, 'nenter': 2}
+
+    def toggle_layout(self):
+        """经典 6 行 / 108 键布局切换"""
+        self.use_classic_layout = not self.use_classic_layout
+        self._build_keyboard()
+        self.update_scale(self.base_size)
+        self._update_layout_btn()
+
+    def _update_layout_btn(self):
+        if self.use_classic_layout:
+            self.btn_layout.setText("108")
+            self.btn_layout.setToolTip("当前：经典 6 行布局，点击切换为 108 键布局")
+        else:
+            self.btn_layout.setText("经典")
+            self.btn_layout.setToolTip("当前：108 键布局，点击切换为经典 6 行布局")
 
     def _toggle_mod(self, mod, checked):
         if checked: self.locked_modifiers.add(mod)
@@ -924,18 +1317,16 @@ class VirtualKeyboardApp(QWidget):
 
     def _vk_press(self, key):
         """鼠标按下虚拟按键"""
-        if key in self.buttons:
-            self.buttons[key].setProperty("is_pressed", True)
-            self._style_btn(self.buttons[key], True)
-        # 播放音效
-        self.audio.play_key(key)
+        self.mouse_pressed_keys.add(key)  # 长按（如 VOL+）期间不被卡键清理熄灭
+        self._set_key_light(key, True)
+        # 播放音效（返回值用于下方调试行）
+        self._show_key_debug(key, self.audio.play_key(key))
         self._update_indicators()
 
     def _vk_release(self, key):
         """鼠标释放虚拟按键"""
-        if key in self.buttons:
-            self.buttons[key].setProperty("is_pressed", False)
-            self._style_btn(self.buttons[key], False)
+        self.mouse_pressed_keys.discard(key)
+        self._set_key_light(key, False)
         self.audio.release_key(key)
 
         # ★ 模拟输入：先恢复前台窗口焦点再 SendInput
@@ -961,6 +1352,32 @@ class VirtualKeyboardApp(QWidget):
         else:
             btn.setStyleSheet(f"background-color:rgba(10,10,10,150);color:{self.theme_color};border:1px solid {self.theme_color};border-radius:5px;font-weight:bold;")
 
+    def _set_key_light(self, key, on):
+        """点亮/熄灭按键；熄灭时保证最少亮 200ms。
+        媒体键（如音量键）常为脉冲式 down+up，几乎同时到达，不保底可见时长则按下效果肉眼不可见"""
+        btn = self.buttons.get(key)
+        if not btn: return
+        if on:
+            self._press_ts[key] = time.time()
+            btn.setProperty("is_pressed", True)
+            self._style_btn(btn, True)
+            return
+        ts = self._press_ts.get(key)
+        remain = 0.2 - (time.time() - ts) if ts else 0.0
+        if remain > 0:
+            QTimer.singleShot(int(remain * 1000), lambda: self._light_off(key, ts))
+        else:
+            self._light_off(key, ts)
+
+    def _light_off(self, key, ts):
+        if ts is not None and self._press_ts.get(key) != ts:
+            return  # 延迟期间又被按下，交给新一次释放处理
+        self._press_ts.pop(key, None)
+        btn = self.buttons.get(key)
+        if btn:
+            btn.setProperty("is_pressed", False)
+            self._style_btn(btn, False)
+
     def _update_indicators(self):
         if self.audio.shift_reverse:
             self.lbl_rev.setStyleSheet(f"background-color:{self.theme_color};color:black;border-radius:3px;font-weight:bold;")
@@ -974,6 +1391,8 @@ class VirtualKeyboardApp(QWidget):
     def apply_styles(self):
         self.kb_container.setStyleSheet(f"QWidget#KBC{{background-color:rgba(15,15,15,240);border:2px solid {self.theme_color};border-radius:10px;}}")
         self.btn_gear.setStyleSheet(f"background-color:rgba(30,30,30,200);color:{self.theme_color};border:1px solid {self.theme_color};border-radius:5px;font-weight:bold;")
+        self.btn_hide.setStyleSheet(f"background-color:rgba(30,30,30,200);color:{self.theme_color};border:1px solid {self.theme_color};border-radius:5px;font-weight:bold;")
+        self.btn_layout.setStyleSheet(f"background-color:rgba(30,30,30,200);color:{self.theme_color};border:1px solid {self.theme_color};border-radius:3px;")
         for btn in self.buttons.values():
             self._style_btn(btn, btn.property("is_pressed"))
         self._update_indicators()
@@ -981,34 +1400,42 @@ class VirtualKeyboardApp(QWidget):
 
     def update_scale(self, sz):
         self.base_size = sz
-        sp = max(2, int(sz*0.12))
-        self.kb_layout.setSpacing(sp)
-        font = QFont("Arial", max(6, int(sz*0.28)), QFont.Bold)
-        for ri, row in enumerate(self.rows_def):
-            n=len(row); self.row_layouts[ri].setSpacing(sp)
-            ts=sp*(n-1); aw=int(15.0*sz)-ts
-            tm=sum(m for _,_,m in row)
-            rw=[(m/tm)*aw for _,_,m in row]
-            iw=[int(w) for w in rw]
-            pe=aw-sum(iw)
-            rem=sorted(range(n),key=lambda i:rw[i]-iw[i],reverse=True)
-            for i in range(abs(pe)): iw[rem[i%n]]+=1 if pe>0 else -1
-            for i,(rk,_,_) in enumerate(row):
-                self.buttons[rk].setFixedSize(iw[i],sz)
-                self.buttons[rk].setFont(font)
+        gap = max(2, int(sz*0.10))    # 键间隙
+        vs = max(2, int(sz*0.12))     # 行距
+        unit = int(18.0*sz) / self._total_units  # 18.0 = 键盘总宽系数（宽度较初版 +20%）
+        if self.use_classic_layout:
+            unit = sz  # 经典布局按标准键帽尺寸排布（1u = 键帽尺寸），还原原版比例
+        M = 10  # 容器内边距
+        for rk, (ri, su, wm) in self._key_geom.items():
+            btn = self.buttons[rk]
+            x0 = M + round(unit*su); x1 = M + round(unit*(su+wm))
+            y = M + ri*(sz+vs)
+            span = self._row_span.get(rk, 1)
+            h = span*sz + (span-1)*vs
+            btn.setGeometry(x0 + gap//2, y, max(1, (x1-x0) - gap), h)
+            # 字号随标签长度自动收缩，避免小键帽文字被裁切
+            f = QFont("Arial"); f.setBold(True); f.setPixelSize(max(6, int(unit*0.34)))
+            while f.pixelSize() > 6 and QFontMetrics(f).horizontalAdvance(btn.text()) > (x1-x0) - gap - 4:
+                f.setPixelSize(f.pixelSize()-1)
+            btn.setFont(f)
+        self.kb_container.setFixedSize(
+            M*2 + round(unit*self._total_units),
+            M*2 + self._n_rows*sz + (self._n_rows-1)*vs)
         self.apply_styles(); self.adjustSize()
+        self._save_settings()
 
-    def update_opacity(self, v): self.setWindowOpacity(v/100.0)
+    def update_opacity(self, v): self.setWindowOpacity(v/100.0); self._save_settings()
 
     def change_theme(self, idx):
         cs=["#FF8C00","#00FF00","#00FFFF","#AA00FF","#FF3333"]
         if 0<=idx<len(cs):
             self.theme_color=cs[idx]; self.apply_styles()
             if hasattr(self,'settings_dialog'): self.settings_dialog.update_theme(self.theme_color)
+            self._save_settings()
 
     def open_settings(self): self.settings_dialog.show(); self.settings_dialog.raise_()
     def toggle_vis(self): self.hide() if self.isVisible() else self.show()
-    def quit_app(self): keyboard.unhook_all(); QApplication.quit()
+    def quit_app(self): self._save_settings(); self.raw_hook.stop(); QApplication.quit()
 
     def mousePressEvent(self, e):
         if e.button()==Qt.LeftButton: self._drag_pos=e.globalPos()-self.frameGeometry().topLeft()
@@ -1016,39 +1443,69 @@ class VirtualKeyboardApp(QWidget):
         if e.buttons()==Qt.LeftButton and self._drag_pos: self.move(e.globalPos()-self._drag_pos)
     def mouseReleaseEvent(self, e): self._drag_pos=None
 
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        # 窗口宽度变化（如调整尺寸滑块）后，按新宽度重新截断调试行文本
+        if hasattr(self, 'lbl_debug'):
+            self._set_debug_text(self._debug_full, self._debug_color)
+
     def start_keyboard_hook(self):
-        def on_hook(e):
-            global _is_simulating
-            if _is_simulating: return
-            if hasattr(self,'settings_dialog') and self.settings_dialog.is_editing:
-                if self.settings_dialog.isActiveWindow(): return
-            k=normalize_key(e.name, getattr(e,'scan_code',None))
-            if not k: return
-            if e.event_type==keyboard.KEY_DOWN:
-                if k not in self.pressed_keys:
-                    self.pressed_keys.add(k); self.key_sig.pressed.emit(k)
-            elif e.event_type==keyboard.KEY_UP:
-                self.pressed_keys.discard(k); self.key_sig.released.emit(k)
-        keyboard.hook(on_hook)
+        self.raw_hook = RawKeyHook()
+        def on_raw(key, down):
+            if hasattr(self, 'settings_dialog') and self.settings_dialog.is_editing:
+                return  # 按键捕获期间由捕获对话框自行监听
+            if down:
+                if key not in self.pressed_keys:
+                    self.pressed_keys.add(key); self.key_sig.pressed.emit(key)
+            else:
+                self.pressed_keys.discard(key); self.key_sig.released.emit(key)
+        self.raw_hook.add_listener(on_raw)
+        self.raw_hook.start()
 
     def _cleanup_stuck(self):
         for k,b in self.buttons.items():
-            if b.property("is_pressed") and k not in self.pressed_keys:
-                b.setProperty("is_pressed",False); self._style_btn(b,False)
+            if b.property("is_pressed") and k not in self.pressed_keys and k not in self.mouse_pressed_keys:
+                b.setProperty("is_pressed",False); self._style_btn(b,False); self._press_ts.pop(k, None)
 
     def on_key_pressed(self, key):
-        if key in self.buttons:
-            self.buttons[key].setProperty("is_pressed",True)
-            self._style_btn(self.buttons[key],True)
-        self.audio.play_key(key)
+        self._set_key_light(key, True)
+        self._show_key_debug(key, self.audio.play_key(key))
         self._update_indicators()
 
     def on_key_released(self, key):
-        if key in self.buttons:
-            self.buttons[key].setProperty("is_pressed",False)
-            self._style_btn(self.buttons[key],False)
+        self._set_key_light(key, False)
         self.audio.release_key(key)
         self.pressed_keys.discard(key)
+
+    # ===================== 按键调试行 =====================
+    def _debug_idle(self):
+        """无按键时的占位提示（保持行高稳定）"""
+        self._set_debug_text("调试 · 按下任意键显示：键码 / 音效 / 播放状态", "#8a8a8a")
+
+    def _set_debug_text(self, text, color):
+        """更新调试行；过长的音效名按当前宽度截断，避免撑破窗口"""
+        self._debug_full, self._debug_color = text, color
+        if not hasattr(self, 'lbl_debug'):
+            return
+        shown = text
+        w = self.lbl_debug.contentsRect().width() - 16
+        if text and w > 40:
+            fm = QFontMetrics(self.lbl_debug.font())
+            shown = fm.elidedText(text, Qt.ElideRight, w)
+        self.lbl_debug.setText(shown)
+        self.lbl_debug.setStyleSheet(
+            f"QLabel#DBG{{background-color:rgba(10,10,10,200);color:{color};"
+            f"border:1px solid #444;border-radius:4px;padding:2px 8px;}}")
+
+    def _show_key_debug(self, key, result):
+        """按键按下后刷新调试行：键码 | 关联音效 | 是否正常播放，最多显示 5 秒"""
+        ok, snd, detail = result
+        vk = _NAME_TO_VK.get(key) or VK_MAP.get(key)
+        code = f"{key}(VK 0x{vk:02X})" if vk else key
+        self._set_debug_text(
+            f"键码 {code} ｜ 音效 {snd or '—'} ｜ {'✔' if ok else '✘'} {detail}",
+            "#8dff8d" if ok else "#ff7d7d")
+        self._debug_timer.start(5000)
 
 
 if __name__ == '__main__':
